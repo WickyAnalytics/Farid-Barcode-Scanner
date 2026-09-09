@@ -77,6 +77,8 @@
 <body>
   <h1>📷 Attendance Scanner</h1>
   <div class="session-banner" id="sessionBanner">Loading session…</div>
+  <button id="testConnBtn" style="width:100%;max-width:480px;padding:10px;margin:6px 0;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#94a3b8;font-size:13px;">🔧 Test Connection to Apps Script</button>
+  <div id="connResult" style="width:100%;max-width:480px;font-size:12px;color:#94a3b8;text-align:center;"></div>
 
   <div id="reader"></div>
 
@@ -116,6 +118,30 @@
   document.getElementById('sessionBanner').innerHTML = sessionId
     ? `Scanning into: <b>${sessionLabel || sessionId}</b>`
     : `<span style="color:#f87171">No session_id in the URL — open this page from the Attendance app's "Open Barcode Scanner" button.</span>`;
+
+  // ---- connectivity test (isolates a broken deployment/URL from a
+  //      doPost-specific problem — run this FIRST if you're seeing
+  //      "Failed to fetch" errors) ----
+  document.getElementById('testConnBtn').onclick = async () => {
+    const out = document.getElementById('connResult');
+    out.textContent = 'Testing…';
+    // Step 1: plain GET, no custom headers — the simplest possible cross-origin
+    // request. If this fails, it's a deployment/access-level problem, not a
+    // doPost/CORS-header problem.
+    try {
+      const r = await fetch(APPS_SCRIPT_URL + (APPS_SCRIPT_URL.includes('?') ? '&' : '?') + 'ping=1');
+      const text = await r.text();
+      let parsed;
+      try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+      if (parsed && parsed.success) {
+        out.innerHTML = '<span style="color:#4ade80">✅ GET works — deployment and CORS are fine. If scanning still fails, the problem is specific to POST/doPost — check the SHARED_TOKEN matches exactly in both files.</span>';
+      } else {
+        out.innerHTML = `<span style="color:#f59e0b">⚠️ Got a response, but not the expected JSON ping. First 200 chars: ${text.slice(0,200).replace(/</g,'&lt;')}</span>`;
+      }
+    } catch (err) {
+      out.innerHTML = `<span style="color:#f87171">❌ GET failed: ${err}. This means the browser can't reach the Apps Script URL at all — check (in order): 1) the deployment's Access is set to "Anyone" (not "Anyone with a Google account" — this is easy to get wrong on a school/Workspace account), 2) you're using the /exec URL, not /dev, 3) you created a NEW deployment after the latest Code.gs edit (Deploy &gt; Manage deployments &gt; edit &gt; New version &gt; Deploy — just saving isn't enough), 4) APPS_SCRIPT_URL here has no typo/trailing space.</span>`;
+    }
+  };
 
   // beep on scan
   let audioCtx;
@@ -187,7 +213,7 @@
         updateHistory();
       }
     } catch (err) {
-      showResult('err', 'Network error', String(err));
+      showResult('err', 'Network error', String(err) + '<br><br>Tap "🔧 Test Connection" above to narrow down why.');
     }
     busy = false;
   }
@@ -259,7 +285,7 @@
     const scanner = new Html5Qrcode('reader');
     scanner.start(
       { facingMode: 'environment' },
-      { fps: 10, qrbox: { width: 260, height: 150 } },
+      { fps: 10, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0 },
       onScanSuccess
     ).catch(err => {
       showResult('err', 'Camera error', String(err) + ' — check your phone browser\'s site settings allow camera access for this page.');
