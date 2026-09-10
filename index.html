@@ -1,28 +1,15 @@
 <!--
-  scanner.html — the ONLY file that needs a real HTTPS host (Netlify,
-  GitHub Pages, Vercel, Firebase Hosting — any of them, all free).
+  scanner.html (v4) — the ONLY file that lives outside Apps Script, on a real
+  HTTPS host (GitHub Pages / Netlify / Vercel). Apps Script pages run inside a
+  sandboxed iframe where browsers block the camera, so scanning happens here.
 
-  WHY THIS FILE EXISTS SEPARATELY FROM Scan.html:
-  Google Apps Script serves HtmlService pages inside a sandboxed iframe
-  on an opaque googleusercontent.com origin. Browsers categorically
-  block camera access (getUserMedia) from opaque/sandboxed origins —
-  this is enforced below the level of any permission prompt, so no
-  setting fixes it from inside Apps Script. This page runs on a real,
-  non-sandboxed HTTPS origin instead, where the camera works normally,
-  and talks to your Apps Script backend over the network.
+  Opened by App.html's "Open Barcode Scanner" with the session attached:
+    ?session_id=SAT-G1-2026-09-12&session_label=...&group_id=SAT-G1&token=...&by=George
+  Talks to Code.gs via doPost (Content-Type text/plain to dodge CORS preflight).
 
-  HOW IT'S OPENED:
-  Scan.html opens this page in a new tab with the currently-selected
-  session attached as URL parameters, e.g.:
-    https://your-host/scanner.html?session_id=SES-0004&session_label=...&token=...
-  That keeps every scan tied to the exact session the teacher picked —
-  a scan here can never land against the wrong session.
-
-  SETUP (see README.md for full steps):
-  1. Deploy your Apps Script project as a Web App, copy its /exec URL.
-  2. Paste that URL into APPS_SCRIPT_URL below.
-  3. Make sure SHARED_TOKEN below matches SHARED_TOKEN in Code.gs.
-  4. Upload this single file to Netlify / GitHub Pages / Vercel.
+  SETUP: set APPS_SCRIPT_URL below to your /exec URL. SHARED_TOKEN is passed
+  in the URL by the app (from the Settings tab); the constant here is only a
+  fallback if the page is opened by hand.
 -->
 <!DOCTYPE html>
 <html lang="en">
@@ -33,264 +20,97 @@
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: -apple-system, Arial, sans-serif; background: #0f172a; color: white;
-    min-height: 100vh; padding: 16px; display: flex; flex-direction: column; align-items: center;
-  }
+  body { font-family: -apple-system, Arial, sans-serif; background: #0f172a; color: white; min-height: 100vh; padding: 16px; display: flex; flex-direction: column; align-items: center; }
   h1 { font-size: 20px; margin-bottom: 4px; }
-  .session-banner {
-    width: 100%; max-width: 480px; background: #1e293b; border-radius: 10px;
-    padding: 10px 14px; margin: 10px 0; font-size: 13px; color: #94a3b8; text-align: center;
-  }
-  .session-banner b { color: #22d3ee; }
-  #reader { width: 100%; max-width: 480px; border-radius: 12px; overflow: hidden; margin: 10px 0; }
-  .combo-wrap { width: 100%; max-width: 480px; position: relative; margin: 10px 0; }
-  input[type=text] {
-    width: 100%; padding: 12px; font-size: 16px; border-radius: 8px; border: none;
-    background: #1e293b; color: white;
-  }
-  #comboResults { margin-top: 6px; max-height: 260px; overflow-y: auto; }
-  .suggestion { padding: 12px; border-radius: 8px; margin-bottom: 4px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; background: #1e293b; }
-  .suggestion.cross-group { border-left: 4px solid #f59e0b; background: #3a2c14; }
-  .s-name { font-weight: 600; }
-  .s-code { font-size: 12px; color: #94a3b8; }
-  .s-tag { font-size: 11px; font-weight: 700; color: #f59e0b; text-transform: uppercase; }
-  .result-box {
-    background: #1e293b; border: 2px solid #22d3ee; border-radius: 12px;
-    padding: 15px 20px; margin: 10px 0; width: 100%; max-width: 480px; text-align: center;
-  }
-  .result-box.warn { border-color: #f59e0b; }
-  .result-box.dup { border-color: #fbbf24; }
-  .result-box.err { border-color: #f87171; }
-  .result-box .who { font-size: 20px; font-weight: bold; margin: 6px 0; }
-  .status { font-size: 14px; margin: 4px 0; color: #94a3b8; }
-  .flag { color: #f59e0b; font-weight: 600; margin-top: 6px; font-size: 13px; }
-  .history { width: 100%; max-width: 480px; margin-top: 16px; }
-  .history h3 { margin-bottom: 8px; color: #94a3b8; font-size: 13px; }
-  .history-item {
-    background: #1e293b; padding: 10px 14px; border-radius: 8px; margin: 5px 0;
-    display: flex; justify-content: space-between; font-size: 13px;
-  }
-  .back-link { margin-top: 20px; color: #64748b; font-size: 13px; text-align: center; }
+  .banner, #reader, .combo, .box, .history, button.test { width: 100%; max-width: 480px; }
+  .banner { background: #1e293b; border-radius: 10px; padding: 10px 14px; margin: 10px 0; font-size: 13px; color: #94a3b8; text-align: center; } .banner b { color: #22d3ee; }
+  #reader { border-radius: 12px; overflow: hidden; margin: 10px 0; }
+  .combo { position: relative; margin: 10px 0; }
+  input { width: 100%; padding: 12px; font-size: 16px; border-radius: 8px; border: none; background: #1e293b; color: white; }
+  #sug { margin-top: 6px; max-height: 260px; overflow-y: auto; }
+  .s { padding: 12px; border-radius: 8px; margin-bottom: 4px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; background: #1e293b; }
+  .s.cross { border-left: 4px solid #f59e0b; background: #3a2c14; } .tag { font-size: 11px; font-weight: 700; color: #f59e0b; text-transform: uppercase; }
+  .box { background: #1e293b; border: 2px solid #22d3ee; border-radius: 12px; padding: 15px 20px; margin: 10px 0; text-align: center; display: none; }
+  .box.warn { border-color: #f59e0b; } .box.dup { border-color: #fbbf24; } .box.err { border-color: #f87171; }
+  .who { font-size: 20px; font-weight: bold; margin: 6px 0; } .st { font-size: 14px; color: #94a3b8; } .flag { color: #f59e0b; font-weight: 600; margin-top: 6px; font-size: 13px; }
+  .wa { display: inline-block; margin-top: 8px; background: #25d366; color: white; padding: 8px 14px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 14px; }
+  .history { margin-top: 16px; } .history h3 { margin-bottom: 8px; color: #94a3b8; font-size: 13px; }
+  .h { background: #1e293b; padding: 10px 14px; border-radius: 8px; margin: 5px 0; display: flex; justify-content: space-between; font-size: 13px; }
+  button.test { padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #94a3b8; font-size: 13px; }
+  .foot { margin-top: 20px; color: #64748b; font-size: 13px; text-align: center; }
 </style>
 </head>
 <body>
-  <h1>📷 Attendance Scanner</h1>
-  <div class="session-banner" id="sessionBanner">Loading session…</div>
-  <button id="testConnBtn" style="width:100%;max-width:480px;padding:10px;margin:6px 0;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#94a3b8;font-size:13px;">🔧 Test Connection to Apps Script</button>
-  <div id="connResult" style="width:100%;max-width:480px;font-size:12px;color:#94a3b8;text-align:center;"></div>
-
-  <div id="reader"></div>
-
-  <div class="combo-wrap">
-    <input type="text" id="studentCombo" placeholder="Or type a name / ID here..." autocomplete="off">
-    <div id="comboResults"></div>
-  </div>
-
-  <div class="result-box" id="resultBox" style="display:none">
-    <div class="who" id="whoText">--</div>
-    <div class="status" id="statusText"></div>
-  </div>
-
-  <div class="history" id="historySection" style="display:none">
-    <h3>Scanned this session</h3>
-    <div id="historyList"></div>
-  </div>
-
-  <div class="back-link">Done scanning? Switch back to the Attendance tab to review and archive.</div>
+<h1>📷 Attendance Scanner</h1>
+<div class="banner" id="banner">Loading session…</div>
+<button class="test" id="test">🔧 Test connection</button><div id="testOut" class="banner" style="display:none"></div>
+<div id="reader"></div>
+<div class="combo"><input id="combo" placeholder="Or type a name / ID…" autocomplete="off"><div id="sug"></div></div>
+<div class="box" id="box"><div class="who" id="who">--</div><div class="st" id="st"></div><div id="waWrap"></div></div>
+<div class="history" id="hist" style="display:none"><h3>Scanned this session</h3><div id="histList"></div></div>
+<div class="foot">Done? Switch back to the Attendance tab, tap Refresh, then End Session &amp; Archive.</div>
 
 <script>
-  // ============ CONFIGURE THESE TWO VALUES ============
-  const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwmcMsgLQbkT0R7pjlu6N25DRKlfXr35Mm1EwZBRmbzlYmm-ndEkrVu6zImPj861P10/exec'; // paste your /exec URL
-  const SHARED_TOKEN = 'FaridAttendance2026Scanner';                 // must match Code.gs SHARED_TOKEN
-  // ======================================================
+// ============ CONFIGURE ============
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwmcMsgLQbkT0R7pjlu6N25DRKlfXr35Mm1EwZBRmbzlYmm-ndEkrVu6zImPj861P10/exec';
+const SHARED_TOKEN_FALLBACK = 'FaridAttendance2026Scanner';
+// ===================================
+const P = new URLSearchParams(location.search);
+const sessionId = P.get('session_id'), sessionLabel = P.get('session_label') || '', groupId = P.get('group_id') || '';
+const token = P.get('token') || SHARED_TOKEN_FALLBACK, by = P.get('by') || 'Scanner';
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let history = [], lastScan = '', lastAt = 0, busy = false;
 
-  const params = new URLSearchParams(window.location.search);
-  const sessionId = params.get('session_id');
-  const sessionLabel = params.get('session_label') || '';
-  const tokenFromUrl = params.get('token') || SHARED_TOKEN;
+document.getElementById('banner').innerHTML = sessionId ? `Scanning into: <b>${esc(sessionLabel || sessionId)}</b><br><small>${esc(sessionId)}</small>`
+  : '<span style="color:#f87171">No session in the URL — open this page from the Attendance app.</span>';
 
-  const scanHistory = [];
-  let lastScan = '';
-  let lastScanTime = 0;
-  let busy = false;
+async function api(action, extra) {
+  const r = await fetch(APPS_SCRIPT_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(Object.assign({ action, token }, extra)) });
+  return r.json();
+}
+document.getElementById('test').onclick = async () => {
+  const o = document.getElementById('testOut'); o.style.display = 'block'; o.textContent = 'Testing…';
+  try { const r = await fetch(APPS_SCRIPT_URL + '?ping=1'); const j = await r.json(); o.innerHTML = j.success ? '<span style="color:#4ade80">✅ Reachable. If scans still fail, check SHARED_TOKEN in the Settings tab.</span>' : '⚠️ Unexpected reply'; }
+  catch (e) { o.innerHTML = `<span style="color:#f87171">❌ ${esc(e)} — check the deployment is "Anyone", you used the /exec URL, and you created a NEW deployment after the last Code.gs edit.</span>`; }
+};
+let ctx; function beep() { try { ctx = ctx || new (window.AudioContext || window.webkitAudioContext)(); const o = ctx.createOscillator(), g = ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.frequency.value = 1200; g.gain.value = .25; o.start(); o.stop(ctx.currentTime + .15); } catch (e) {} }
 
-  document.getElementById('sessionBanner').innerHTML = sessionId
-    ? `Scanning into: <b>${sessionLabel || sessionId}</b>`
-    : `<span style="color:#f87171">No session_id in the URL — open this page from the Attendance app's "Open Barcode Scanner" button.</span>`;
-
-  // ---- connectivity test (isolates a broken deployment/URL from a
-  //      doPost-specific problem — run this FIRST if you're seeing
-  //      "Failed to fetch" errors) ----
-  document.getElementById('testConnBtn').onclick = async () => {
-    const out = document.getElementById('connResult');
-    out.textContent = 'Testing…';
-    // Step 1: plain GET, no custom headers — the simplest possible cross-origin
-    // request. If this fails, it's a deployment/access-level problem, not a
-    // doPost/CORS-header problem.
-    try {
-      const r = await fetch(APPS_SCRIPT_URL + (APPS_SCRIPT_URL.includes('?') ? '&' : '?') + 'ping=1');
-      const text = await r.text();
-      let parsed;
-      try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
-      if (parsed && parsed.success) {
-        out.innerHTML = '<span style="color:#4ade80">✅ GET works — deployment and CORS are fine. If scanning still fails, the problem is specific to POST/doPost — check the SHARED_TOKEN matches exactly in both files.</span>';
-      } else {
-        out.innerHTML = `<span style="color:#f59e0b">⚠️ Got a response, but not the expected JSON ping. First 200 chars: ${text.slice(0,200).replace(/</g,'&lt;')}</span>`;
-      }
-    } catch (err) {
-      out.innerHTML = `<span style="color:#f87171">❌ GET failed: ${err}. This means the browser can't reach the Apps Script URL at all — check (in order): 1) the deployment's Access is set to "Anyone" (not "Anyone with a Google account" — this is easy to get wrong on a school/Workspace account), 2) you're using the /exec URL, not /dev, 3) you created a NEW deployment after the latest Code.gs edit (Deploy &gt; Manage deployments &gt; edit &gt; New version &gt; Deploy — just saving isn't enough), 4) APPS_SCRIPT_URL here has no typo/trailing space.</span>`;
+function onScan(text) { const n = Date.now(); if (text === lastScan && n - lastAt < 3000) return; lastScan = text; lastAt = n; beep(); handle(text, 'Barcode'); }
+async function handle(id, method) {
+  if (busy || !sessionId) return; busy = true; show('', 'Looking up…', '');
+  try {
+    const l = await api('lookup', { student_id: id });
+    if (!l.success || !l.data.found) { show('err', 'Not recognized', `No student matches "${esc(id)}"`); busy = false; return; }
+    const a = await api('recordAttendance', { student_id: l.data.student_id, session_id: sessionId, entry_method: method, recorded_by: by });
+    if (!a.success) show('err', 'Error', esc(a.error));
+    else if (a.data.status === 'duplicate') show('dup', l.data.name, `Already recorded at ${a.data.time}`);
+    else if (a.data.status === 'error') show('err', 'Could not save', esc(a.data.message));
+    else {
+      const d = a.data;
+      show(d.was_default ? '' : 'warn', d.student_name, `${d.is_late ? `<span style="color:#f59e0b">+${d.delay_minutes} min late</span>` : '<span style="color:#4ade80">On time</span>'} · ${esc(d.courses_covered)}${d.was_default ? '' : `<div class="flag">⚠️ Usual group ${d.student_group_id} — recorded as visiting</div>`}`, d.whatsapp, d.parent1_name);
+      history.unshift({ name: d.student_name, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) });
+      document.getElementById('hist').style.display = 'block';
+      document.getElementById('histList').innerHTML = history.slice(0, 30).map((h) => `<div class="h"><span>${esc(h.name)}</span><span style="color:#64748b">${h.time}</span></div>`).join('');
     }
-  };
+  } catch (e) { show('err', 'Network error', esc(e) + ' — tap Test connection.'); }
+  busy = false;
+}
+function show(cls, who, st, wa, pname) {
+  const b = document.getElementById('box'); b.className = 'box' + (cls ? ' ' + cls : ''); b.style.display = 'block';
+  document.getElementById('who').textContent = who; document.getElementById('st').innerHTML = st;
+  document.getElementById('waWrap').innerHTML = wa ? `<a class="wa" href="${wa}" target="_blank">Send WhatsApp to ${esc(pname || 'parent')}</a>` : '';
+}
+const combo = document.getElementById('combo'); let t;
+combo.addEventListener('input', () => { clearTimeout(t); t = setTimeout(async () => {
+  if (!combo.value) return (document.getElementById('sug').innerHTML = '');
+  const r = await api('suggest', { query: combo.value, group_id: groupId });
+  if (r.success) document.getElementById('sug').innerHTML = r.data.map((s) => `<div class="s ${s.in_group ? '' : 'cross'}" onclick="pick('${s.student_id}')"><div><b>${esc(s.name)}</b><div style="font-size:12px;color:#94a3b8">${s.student_id}</div></div>${s.in_group ? '' : `<span class="tag">${s.group_id} · visiting</span>`}</div>`).join('');
+}, 200); });
+combo.addEventListener('keydown', (e) => { if (e.key === 'Enter' && combo.value.trim()) { handle(combo.value.trim(), 'Manual'); combo.value = ''; document.getElementById('sug').innerHTML = ''; } });
+function pick(id) { combo.value = ''; document.getElementById('sug').innerHTML = ''; handle(id, 'Manual'); }
 
-  // beep on scan
-  let audioCtx;
-  function beep() {
-    try {
-      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.connect(gain); gain.connect(audioCtx.destination);
-      osc.frequency.value = 1200; gain.gain.value = 0.25;
-      osc.start(); osc.stop(audioCtx.currentTime + 0.15);
-    } catch (e) {}
-  }
-
-  // ---- Apps Script call helper ----
-  // Content-Type: text/plain avoids a CORS preflight (which Apps Script
-  // can't answer), while still letting us read back a real JSON response
-  // (unlike mode:'no-cors', which would make the response unreadable).
-  async function callBackend(action, extra) {
-    const payload = Object.assign({ action, token: tokenFromUrl }, extra);
-    const res = await fetch(APPS_SCRIPT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload),
-    });
-    return res.json();
-  }
-
-  // ---- barcode scan handling ----
-  function onScanSuccess(decodedText) {
-    const now = Date.now();
-    if (decodedText === lastScan && now - lastScanTime < 3000) return; // 3s debounce
-    lastScan = decodedText;
-    lastScanTime = now;
-    beep();
-    handleStudent(decodedText, 'Barcode');
-  }
-
-  async function handleStudent(studentId, method) {
-    if (busy || !sessionId) return;
-    busy = true;
-    showResult('', 'Looking up…', '');
-    try {
-      const lookupRes = await callBackend('lookup', { student_id: studentId });
-      if (!lookupRes.success || !lookupRes.data.found) {
-        showResult('err', 'Not recognized', `No student matches "${studentId}".`);
-        busy = false;
-        return;
-      }
-      const info = lookupRes.data;
-      const attRes = await callBackend('recordAttendance', {
-        student_id: info.student_id, session_id: sessionId, entry_method: method,
-      });
-      if (!attRes.success) {
-        showResult('err', 'Error', attRes.error || 'Could not save.');
-        busy = false;
-        return;
-      }
-      const result = attRes.data;
-      if (result.status === 'duplicate') {
-        showResult('dup', info.name, `Already recorded today at ${result.time}.`);
-      } else if (result.status === 'error') {
-        showResult('err', 'Could not save', result.message || 'Please try again.');
-      } else {
-        const cross = result.was_default ? '' : `<div class="flag">⚠️ Usual group is ${info.default_group_name} — recorded as a different session.</div>`;
-        showResult(result.was_default ? '' : 'warn', result.student_name,
-          `${result.delay_minutes > 0 ? '+' + result.delay_minutes + ' min late' : 'On time'} · ${result.courses_covered}${cross}`);
-        scanHistory.unshift({ name: result.student_name, time: new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) });
-        updateHistory();
-      }
-    } catch (err) {
-      showResult('err', 'Network error', String(err) + '<br><br>Tap "🔧 Test Connection" above to narrow down why.');
-    }
-    busy = false;
-  }
-
-  function showResult(cls, who, status) {
-    const box = document.getElementById('resultBox');
-    box.className = 'result-box' + (cls ? ' ' + cls : '');
-    box.style.display = 'block';
-    document.getElementById('whoText').textContent = who;
-    document.getElementById('statusText').innerHTML = status;
-  }
-
-  function updateHistory() {
-    document.getElementById('historySection').style.display = 'block';
-    document.getElementById('historyList').innerHTML = scanHistory.slice(0, 30).map(i =>
-      `<div class="history-item"><span>${i.name}</span><span style="color:#64748b">${i.time}</span></div>`
-    ).join('');
-  }
-
-  // ---- combined name/ID search (same backend logic as barcode path) ----
-  const combo = document.getElementById('studentCombo');
-  let searchTimer = null;
-  combo.addEventListener('input', () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => runSuggest(combo.value), 200);
-  });
-  combo.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && combo.value.trim()) {
-      handleStudent(combo.value.trim(), 'Manual');
-      combo.value = '';
-      document.getElementById('comboResults').innerHTML = '';
-    }
-  });
-
-  async function runSuggest(query) {
-    if (!query || query.length < 1) { document.getElementById('comboResults').innerHTML = ''; return; }
-    try {
-      const groupId = params.get('group_id') || ''; // optional, only used for in-group highlighting
-      const res = await callBackend('suggest', { query, group_id: groupId });
-      if (res.success) renderSuggestions(res.data);
-    } catch (e) {}
-  }
-
-  function renderSuggestions(list) {
-    const box = document.getElementById('comboResults');
-    if (!list.length) { box.innerHTML = ''; return; }
-    box.innerHTML = list.map(s => `
-      <div class="suggestion ${s.in_group ? '' : 'cross-group'}" onclick="pickStudent('${s.student_id}')">
-        <div>
-          <div class="s-name">${s.name}</div>
-          <div class="s-code">${s.code} · ${s.student_id}</div>
-        </div>
-        ${s.in_group ? '' : '<div class="s-tag">Different group</div>'}
-      </div>
-    `).join('');
-  }
-
-  function pickStudent(studentId) {
-    document.getElementById('comboResults').innerHTML = '';
-    combo.value = '';
-    handleStudent(studentId, 'Manual');
-  }
-
-  // ---- start camera (this works here because this page is a real
-  //      top-level HTTPS origin, not the Apps Script sandboxed iframe) ----
-  if (APPS_SCRIPT_URL.indexOf('YOUR_APPS_SCRIPT_WEB_APP_URL_HERE') !== -1) {
-    showResult('err', 'Not configured', 'Open this file and set APPS_SCRIPT_URL to your Apps Script Web App /exec URL — see README.md.');
-  } else {
-    const scanner = new Html5Qrcode('reader');
-    scanner.start(
-      { facingMode: 'environment' },
-      { fps: 10, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0 },
-      onScanSuccess
-    ).catch(err => {
-      showResult('err', 'Camera error', String(err) + ' — check your phone browser\'s site settings allow camera access for this page.');
-    });
-  }
+new Html5Qrcode('reader').start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0 }, onScan)
+  .catch((err) => show('err', 'Camera error', esc(err) + ' — allow camera access for this site in your browser settings.'));
 </script>
 </body>
 </html>
